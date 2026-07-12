@@ -4,6 +4,7 @@ One file. Config-driven. Switch businesses by editing business_config.json.
 """
 
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from supabase import create_client, Client
@@ -13,6 +14,9 @@ import os
 import json
 import time
 import logging
+import hmac
+import hashlib
+from collections import defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,6 +25,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("unified_bot")
 
 app = FastAPI()
+
+# Security middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify exact domains
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+# Rate limiting
+_rate_limit_store = defaultdict(list)
+RATE_LIMIT_REQUESTS = 100
+RATE_LIMIT_WINDOW = 60  # seconds
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "business_config.json")
 
@@ -36,19 +54,62 @@ TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
+# Validate critical environment variables
+if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY, TWILIO_SID, TWILIO_TOKEN, WEBHOOK_SECRET]):
+    missing = []
+    if not SUPABASE_URL: missing.append("SUPABASE_URL")
+    if not SUPABASE_SERVICE_KEY: missing.append("SUPABASE_SERVICE_KEY")
+    if not TWILIO_SID: missing.append("TWILIO_SID")
+    if not TWILIO_TOKEN: missing.append("TWILIO_TOKEN")
+    if not WEBHOOK_SECRET: missing.append("WEBHOOK_SECRET")
+    raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
 
 _cooldown = {}
 
+def _mask_phone(phone: str) -> str:
+    """Mask phone number for logging (show only first 3 and last 2 digits)"""
+    if not phone or len(phone) < 5:
+        return "***"
+    return phone[:3] + "***" + phone[-2:]
+
+def _check_rate_limit(client_ip: str) -> bool:
+    """Check if client has exceeded rate limit"""
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+    
+    # Clean old requests
+    _rate_limit_store[client_ip] = [
+        timestamp for timestamp in _rate_limit_store[client_ip] 
+        if timestamp > window_start
+    ]
+    
+    # Check if limit exceeded
+    if len(_rate_limit_store[client_ip]) >= RATE_LIMIT_REQUESTS:
+        return False
+    
+    # Add current request
+    _rate_limit_store[client_ip].append(now)
+    return True
+
 def _validate_secret(request: Request, query_secret: str = None):
     header_secret = request.headers.get("x-webhook-secret")
-    if header_secret != WEBHOOK_SECRET and query_secret != WEBHOOK_SECRET:
+    if not WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Server configuration error")
+    
+    def compare_secrets(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        return hmac.compare_digest(a.encode(), b.encode())
+    
+    if not (compare_secrets(header_secret, WEBHOOK_SECRET) or compare_secrets(query_secret, WEBHOOK_SECRET)):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 class LeadPayload(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    phone: str = Field(..., pattern=r"^+?[1-9]d{1,14}$")
+    phone: str = Field(..., pattern=r"^+?[1-9]\d{1,14}$")
     service: str = Field(default="", max_length=200)
     source: str = Field(default="website", max_length=50)
 
@@ -149,7 +210,21 @@ def _template(name: str, **kwargs) -> str:
         "service": "our services",
     }
     defaults.update(kwargs)
-    return tpl.format(**defaults)
+    
+    # Sanitize all inputs to prevent template injection - escape braces
+    sanitized = {}
+    for key, value in defaults.items():
+        if isinstance(value, str):
+            # Escape braces to prevent template injection attacks
+            sanitized[key] = value.replace("{", "{{").replace("}", "}}")
+        else:
+            sanitized[key] = str(value)
+    
+    try:
+        return tpl.format(**sanitized)
+    except (KeyError, ValueError) as e:
+        logger.error(f"Template formatting error: {e}")
+        return "Hi, this is " + CONFIG["owner_name"] + ". We received your request."
 
 def send_sms(to: str, body: str):
     try:
@@ -165,6 +240,10 @@ def send_sms(to: str, body: str):
 
 @app.post("/webhook/{source_type}")
 async def webhook_by_source(source_type: str, request: Request, background_tasks: BackgroundTasks):
+    client_ip = request.client.host
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     if source_type not in PARSERS:
         raise HTTPException(status_code=400, detail=f"Unknown source. Use: {list(PARSERS.keys())}")
     _validate_secret(request)
@@ -174,6 +253,10 @@ async def webhook_by_source(source_type: str, request: Request, background_tasks
 
 @app.post("/webhook/lead")
 async def webhook_auto(request: Request, background_tasks: BackgroundTasks):
+    client_ip = request.client.host
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     _validate_secret(request)
     body = await request.json()
     parsed = _auto_detect(body)
@@ -206,11 +289,15 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
 
     body = _template("instant", name=name, service=service)
     background_tasks.add_task(send_sms, phone, body)
-    logger.info("Lead accepted: phone=%s**** source=%s", phone[:4], source)
+    logger.info("Lead accepted: phone=%s source=%s", _mask_phone(phone), source)
     return {"status": "accepted", "touch": 1, "source": source}
 
 @app.get("/process-followups")
 async def process_followups(request: Request, secret: str = Query(None)):
+    client_ip = request.client.host
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     _validate_secret(request, query_secret=secret)
     now = datetime.utcnow().isoformat()
 
@@ -219,7 +306,7 @@ async def process_followups(request: Request, secret: str = Query(None)):
         leads = resp.data or []
     except Exception as e:
         logger.error(f"DB query failed: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
+        raise HTTPException(status_code=500, detail="Database operation failed")
 
     processed = 0
     for lead in leads:
@@ -237,7 +324,7 @@ async def process_followups(request: Request, secret: str = Query(None)):
             next_delta = timedelta(hours=48)
         else:
             supabase.table("leads").update({"status": "closed", "next_followup_at": None}).eq("id", lead_id).execute()
-            logger.info("Lead closed: id=%s...", str(lead_id)[:4])
+            logger.info("Lead closed: id=%s", str(lead_id)[:8])
             continue
 
         send_sms(phone, body)
@@ -253,6 +340,10 @@ async def process_followups(request: Request, secret: str = Query(None)):
 
 @app.post("/reply")
 async def handle_reply(request: Request):
+    client_ip = request.client.host
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     form = await request.form()
     from_phone = form.get("From", "")
     body = form.get("Body", "")
@@ -265,7 +356,7 @@ async def handle_reply(request: Request):
         if resp.data:
             lead_id = resp.data[0]["id"]
             supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
-            logger.info("Lead responded: id=%s...", str(lead_id)[:4])
+            logger.info("Lead responded: id=%s", str(lead_id)[:8])
     except Exception as e:
         logger.error(f"Reply handling failed: {e}")
 
@@ -273,6 +364,10 @@ async def handle_reply(request: Request):
 
 @app.post("/voice/inbound")
 async def handle_inbound_call(request: Request):
+    client_ip = request.client.host
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     from twilio.twiml import VoiceResponse
     form = await request.form()
     from_phone = form.get("From", "")
@@ -311,14 +406,14 @@ def _send_missed_text(phone: str, call_sid: str):
     now = time.time()
     last_sent = _cooldown.get(phone, 0)
     if (now - last_sent) < cooldown_min * 60:
-        logger.info("SMS cooldown active for %s****", phone[:4])
+        logger.info("SMS cooldown active for %s", _mask_phone(phone))
         return str(VoiceResponse())
 
     body = _template("missed_call")
     try:
         twilio_client.messages.create(to=phone, from_=CONFIG["twilio_phone"], body=body)
         _cooldown[phone] = now
-        logger.info("Missed-call SMS sent to %s****", phone[:4])
+        logger.info("Missed-call SMS sent to %s", _mask_phone(phone))
     except TwilioRestException as e:
         logger.error(f"Twilio SMS error: {e.code}")
     except Exception as e:

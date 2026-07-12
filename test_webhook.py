@@ -61,8 +61,7 @@ def send_test(base_url, secret, source, phone, verbose=True):
     headers = {"Content-Type": "application/json", "x-webhook-secret": secret}
 
     if verbose:
-        print(f"
---- Testing source: {source} ---")
+        print(f"\n--- Testing source: {source} ---")
         print(f"POST {url}")
         print(f"Payload: {json.dumps(payload, indent=2)}")
 
@@ -86,8 +85,7 @@ def test_health(base_url):
     url = f"{base_url.rstrip('/')}/health"
     try:
         resp = requests.get(url, timeout=5)
-        print(f"
---- Health Check ---")
+        print(f"\n--- Health Check ---")
         print(f"GET {url}")
         print(f"Status: {resp.status_code}")
         print(f"Response: {resp.json()}")
@@ -98,8 +96,7 @@ def test_health(base_url):
 def test_unauthorized(base_url):
     url = f"{base_url.rstrip('/')}/webhook/lead"
     payload = payload_generic("+14055551234")
-    print(f"
---- Testing Unauthorized Request (no secret) ---")
+    print(f"\n--- Testing Unauthorized Request (no secret) ---")
     try:
         resp = requests.post(url, json=payload, timeout=10)
         print(f"Status: {resp.status_code} (expected 401)")
@@ -107,6 +104,37 @@ def test_unauthorized(base_url):
             print("PASS: Webhook correctly rejected request without secret.")
         else:
             print("FAIL: Webhook accepted a request with no secret! Check _validate_secret().")
+    except Exception as e:
+        print(f"ERROR: {e}")
+
+def test_wrong_secret(base_url):
+    url = f"{base_url.rstrip('/')}/webhook/lead"
+    payload = payload_generic("+14055551234")
+    headers = {"Content-Type": "application/json", "x-webhook-secret": "wrong_secret"}
+    print(f"\n--- Testing Unauthorized Request (wrong secret) ---")
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        print(f"Status: {resp.status_code} (expected 401)")
+        if resp.status_code == 401:
+            print("PASS: Webhook correctly rejected request with wrong secret.")
+        else:
+            print("FAIL: Webhook accepted a request with wrong secret! Check _validate_secret().")
+    except Exception as e:
+        print(f"ERROR: {e}")
+
+def test_rate_limit(base_url, secret):
+    url = f"{base_url.rstrip('/')}/webhook/lead"
+    payload = payload_generic("+14055551234")
+    headers = {"Content-Type": "application/json", "x-webhook-secret": secret}
+    print(f"\n--- Testing Rate Limiting ---")
+    try:
+        # Send 105 requests (should exceed default 100 limit)
+        for i in range(105):
+            resp = requests.post(url, json=payload, headers=headers, timeout=10)
+            if resp.status_code == 429:
+                print(f"PASS: Rate limit triggered after {i+1} requests")
+                return
+        print("FAIL: Rate limit not triggered after 105 requests")
     except Exception as e:
         print(f"ERROR: {e}")
 
@@ -118,6 +146,7 @@ def main():
     parser.add_argument("--source", default="all", choices=list(ENDPOINTS.keys()) + ["all"])
     parser.add_argument("--phone", default="+14055551234")
     parser.add_argument("--skip-security-check", action="store_true")
+    parser.add_argument("--security-only", action="store_true", help="Run only security tests")
 
     args = parser.parse_args()
 
@@ -125,14 +154,19 @@ def main():
 
     if not args.skip_security_check:
         test_unauthorized(args.url)
+        test_wrong_secret(args.url)
+        if not args.security_only:
+            test_rate_limit(args.url, args.secret)
+    
+    if args.security_only:
+        return
 
     if args.source == "all":
         results = {}
         for src in ["website", "facebook", "google", "typeform"]:
             results[src] = send_test(args.url, args.secret, src, args.phone)
             time.sleep(1)
-        print("
---- Summary ---")
+        print("\n--- Summary ---")
         for src, ok in results.items():
             print(f"{src}: {'PASS' if ok else 'FAIL'}")
     else:
