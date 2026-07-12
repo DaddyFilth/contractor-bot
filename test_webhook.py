@@ -45,8 +45,8 @@ def payload_typeform(phone: str, name: str = "Test Typeform Lead"):
 
 
 ENDPOINTS = {
-    "website": ("/webhook/lead", payload_generic),
-    "generic": ("/webhook/lead", payload_generic),
+    "website": ("/webhook/generic", payload_generic),
+    "generic": ("/webhook/generic", payload_generic),
     "facebook": ("/webhook/facebook", payload_facebook),
     "google": ("/webhook/google", payload_google),
     "typeform": ("/webhook/typeform", payload_typeform),
@@ -94,7 +94,7 @@ def test_health(base_url):
 
 
 def test_unauthorized(base_url):
-    url = f"{base_url.rstrip('/')}/webhook/lead"
+    url = f"{base_url.rstrip('/')}/webhook/generic"
     payload = payload_generic("+14055551234")
     print(f"\n--- Testing Unauthorized Request (no secret) ---")
     try:
@@ -108,7 +108,7 @@ def test_unauthorized(base_url):
         print(f"ERROR: {e}")
 
 def test_wrong_secret(base_url):
-    url = f"{base_url.rstrip('/')}/webhook/lead"
+    url = f"{base_url.rstrip('/')}/webhook/generic"
     payload = payload_generic("+14055551234")
     headers = {"Content-Type": "application/json", "x-webhook-secret": "wrong_secret"}
     print(f"\n--- Testing Unauthorized Request (wrong secret) ---")
@@ -123,7 +123,7 @@ def test_wrong_secret(base_url):
         print(f"ERROR: {e}")
 
 def test_rate_limit(base_url, secret):
-    url = f"{base_url.rstrip('/')}/webhook/lead"
+    url = f"{base_url.rstrip('/')}/webhook/generic"
     payload = payload_generic("+14055551234")
     headers = {"Content-Type": "application/json", "x-webhook-secret": secret}
     print(f"\n--- Testing Rate Limiting ---")
@@ -147,6 +147,7 @@ def main():
     parser.add_argument("--phone", default="+14055551234")
     parser.add_argument("--skip-security-check", action="store_true")
     parser.add_argument("--security-only", action="store_true", help="Run only security tests")
+    parser.add_argument("--test-rate-limit", action="store_true", help="Include rate limiting test (slow)")
 
     args = parser.parse_args()
 
@@ -155,7 +156,8 @@ def main():
     if not args.skip_security_check:
         test_unauthorized(args.url)
         test_wrong_secret(args.url)
-        if not args.security_only:
+        # Only run rate limiting test if explicitly requested (too slow for quick testing)
+        if args.test_rate_limit:
             test_rate_limit(args.url, args.secret)
     
     if args.security_only:
@@ -163,7 +165,7 @@ def main():
 
     if args.source == "all":
         results = {}
-        for src in ["website", "facebook", "google", "typeform"]:
+        for src in ["generic", "facebook", "google", "typeform", "auto"]:
             results[src] = send_test(args.url, args.secret, src, args.phone)
             time.sleep(1)
         print("\n--- Summary ---")

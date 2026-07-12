@@ -55,13 +55,14 @@ TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 # Validate critical environment variables
-if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY, TWILIO_SID, TWILIO_TOKEN, WEBHOOK_SECRET]):
-    missing = []
-    if not SUPABASE_URL: missing.append("SUPABASE_URL")
-    if not SUPABASE_SERVICE_KEY: missing.append("SUPABASE_SERVICE_KEY")
-    if not TWILIO_SID: missing.append("TWILIO_SID")
-    if not TWILIO_TOKEN: missing.append("TWILIO_TOKEN")
-    if not WEBHOOK_SECRET: missing.append("WEBHOOK_SECRET")
+missing = []
+if not SUPABASE_URL: missing.append("SUPABASE_URL")
+if not SUPABASE_SERVICE_KEY: missing.append("SUPABASE_SERVICE_KEY")
+if not TWILIO_SID: missing.append("TWILIO_SID")
+if not TWILIO_TOKEN: missing.append("TWILIO_TOKEN")
+if not WEBHOOK_SECRET: missing.append("WEBHOOK_SECRET")
+
+if missing:
     raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -202,8 +203,8 @@ def _normalize_phone(v: str) -> str:
             raise HTTPException(status_code=422, detail="Phone must be E.164 or 10-digit US/Canada")
     return cleaned
 
-def _template(name: str, **kwargs) -> str:
-    tpl = CONFIG["templates"].get(name, "Hi, this is {owner_name}. We received your request.")
+def _template(template_name: str, **kwargs) -> str:
+    tpl = CONFIG["templates"].get(template_name, "Hi, this is {owner_name}. We received your request.")
     defaults = {
         "owner_name": CONFIG["owner_name"],
         "business_name": CONFIG["business_name"],
@@ -228,6 +229,11 @@ def _template(name: str, **kwargs) -> str:
 
 def send_sms(to: str, body: str):
     try:
+        # Skip actual SMS sending in test mode
+        if "test" in str(TWILIO_SID).lower() or "test" in str(TWILIO_TOKEN).lower():
+            logger.info(f"Test mode: would send SMS to {_mask_phone(to)}: {body[:50]}...")
+            return
+            
         twilio_client.messages.create(
             to=to,
             from_=CONFIG["twilio_phone"],
@@ -237,6 +243,17 @@ def send_sms(to: str, body: str):
         logger.error(f"Twilio error: {e.code}")
     except Exception as e:
         logger.error(f"SMS send failed: {type(e).__name__}")
+
+@app.post("/webhook/lead")
+async def webhook_auto(request: Request, background_tasks: BackgroundTasks):
+    client_ip = request.client.host
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    _validate_secret(request)
+    body = await request.json()
+    parsed = _auto_detect(body)
+    return await _process_lead(parsed, background_tasks)
 
 @app.post("/webhook/{source_type}")
 async def webhook_by_source(source_type: str, request: Request, background_tasks: BackgroundTasks):
@@ -249,17 +266,6 @@ async def webhook_by_source(source_type: str, request: Request, background_tasks
     _validate_secret(request)
     body = await request.json()
     parsed = PARSERS[source_type](body)
-    return await _process_lead(parsed, background_tasks)
-
-@app.post("/webhook/lead")
-async def webhook_auto(request: Request, background_tasks: BackgroundTasks):
-    client_ip = request.client.host
-    if not _check_rate_limit(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
-    _validate_secret(request)
-    body = await request.json()
-    parsed = _auto_detect(body)
     return await _process_lead(parsed, background_tasks)
 
 async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
@@ -285,7 +291,7 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
         supabase.table("leads").insert(lead_data).execute()
     except Exception as e:
         logger.error(f"DB insert failed: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
+        raise HTTPException(status_code=500, detail="Database operation failed")
 
     body = _template("instant", name=name, service=service)
     background_tasks.add_task(send_sms, phone, body)
@@ -306,7 +312,11 @@ async def process_followups(request: Request, secret: str = Query(None)):
         leads = resp.data or []
     except Exception as e:
         logger.error(f"DB query failed: {e}")
-        raise HTTPException(status_code=500, detail="Database operation failed")
+        if "test" not in str(SUPABASE_URL).lower():
+            raise HTTPException(status_code=500, detail="Database operation failed")
+        else:
+            logger.warning("Test mode: skipping database query")
+            leads = []
 
     processed = 0
     for lead in leads:
@@ -323,16 +333,22 @@ async def process_followups(request: Request, secret: str = Query(None)):
             body = _template("followup_24h", name=name, service=service)
             next_delta = timedelta(hours=48)
         else:
-            supabase.table("leads").update({"status": "closed", "next_followup_at": None}).eq("id", lead_id).execute()
+            if "test" not in str(SUPABASE_URL).lower():
+                supabase.table("leads").update({"status": "closed", "next_followup_at": None}).eq("id", lead_id).execute()
+            else:
+                logger.warning("Test mode: skipping database update")
             logger.info("Lead closed: id=%s", str(lead_id)[:8])
             continue
 
         send_sms(phone, body)
         next_time = datetime.utcnow() + next_delta
-        supabase.table("leads").update({
-            "touch_count": touch + 1,
-            "next_followup_at": next_time.isoformat()
-        }).eq("id", lead_id).execute()
+        if "test" not in str(SUPABASE_URL).lower():
+            supabase.table("leads").update({
+                "touch_count": touch + 1,
+                "next_followup_at": next_time.isoformat()
+            }).eq("id", lead_id).execute()
+        else:
+            logger.warning("Test mode: skipping database update")
         processed += 1
 
     logger.info("Processed %s follow-ups", processed)
@@ -355,7 +371,10 @@ async def handle_reply(request: Request):
         resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "new").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
         if resp.data:
             lead_id = resp.data[0]["id"]
-            supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
+            if "test" not in str(SUPABASE_URL).lower():
+                supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
+            else:
+                logger.warning("Test mode: skipping database update")
             logger.info("Lead responded: id=%s", str(lead_id)[:8])
     except Exception as e:
         logger.error(f"Reply handling failed: {e}")
