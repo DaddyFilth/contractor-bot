@@ -1,0 +1,15 @@
+{
+  "business_id": "yessian_sealing",
+  "business_name": "Yessian Sealing",
+  "owner_name": "Mike",
+  "twilio_phone": "+15551234567",
+  "templates": {
+    "instant": "Hi {name}, this is {owner_name} from {business_name}. Got your request about {service}. When is a good time to connect today?",
+    "followup_2h": "Hey {name}, just following up on your {service} request. Still looking for help?",
+    "followup_24h": "Hi {name}, checking in. Ready to move forward? Reply here and I will call you today.",
+    "followup_72h": "Hi {name}, this is my last follow-up. Ready to move forward? If not, no worries.",
+    "missed_call": "Sorry I missed your call, I'm on a job site right now. What do you need help with? Text me here and I will call you back within the hour. -{owner_name}"
+  },
+  "sources": ["website", "facebook", "google", "typeform"],
+  "sms_cooldown_minutes": 15
+}

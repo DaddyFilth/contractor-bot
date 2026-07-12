@@ -1,0 +1,21 @@
+# Environments
+.env
+.env.*
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs
+*.log
+nohup.out
+
+# OS
+.DS_Store
