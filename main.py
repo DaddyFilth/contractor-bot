@@ -311,7 +311,7 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
         try:
             existing = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
             if existing.data:
-                logger.info("Duplicate lead ignored for source=%s", source)
+                logger.info("Duplicate lead ignored")
                 return {"status": "duplicate", "touch": 0, "source": source}
         except Exception as e:
             logger.error(f"Dedup check failed: {e}")
@@ -336,7 +336,8 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
             logger.error(f"DB insert failed: {e}")
             raise HTTPException(status_code=500, detail="Database operation failed")
     else:
-        logger.warning("Test mode: skipping database insert for source=%s", source)
+        logger.warning("Test mode: skipping database insert")
+        return {"status": "accepted", "touch": 1, "source": source}
 
     body = _template("instant", name=name, service=service)
     background_tasks.add_task(send_sms, phone, body)
