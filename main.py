@@ -307,13 +307,14 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
     now = datetime.now(timezone.utc)
 
     # Deduplicate: skip if an active lead already exists for this phone
-    try:
-        existing = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
-        if existing.data:
-            logger.info("Duplicate lead ignored: phone=%s", _mask_phone(phone))
-            return {"status": "duplicate", "touch": 0, "source": source}
-    except Exception as e:
-        logger.error(f"Dedup check failed: {e}")
+    if not TEST_MODE:
+        try:
+            existing = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
+            if existing.data:
+                logger.info("Duplicate lead ignored")
+                return {"status": "duplicate", "touch": 0, "source": source}
+        except Exception as e:
+            logger.error(f"Dedup check failed: {e}")
 
     lead_data = {
         "business_id": CONFIG["business_id"],
@@ -328,11 +329,15 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
         "next_followup_at": (now + timedelta(hours=2)).isoformat(),
     }
 
-    try:
-        supabase.table("leads").insert(lead_data).execute()
-    except Exception as e:
-        logger.error(f"DB insert failed: {e}")
-        raise HTTPException(status_code=500, detail="Database operation failed")
+    if not TEST_MODE:
+        try:
+            supabase.table("leads").insert(lead_data).execute()
+        except Exception as e:
+            logger.error(f"DB insert failed: {e}")
+            raise HTTPException(status_code=500, detail="Database operation failed")
+    else:
+        logger.warning("Test mode: skipping database insert")
+        return {"status": "accepted", "touch": 1, "source": source}
 
     body = _template("instant", name=name, service=service)
     background_tasks.add_task(send_sms, phone, body)
