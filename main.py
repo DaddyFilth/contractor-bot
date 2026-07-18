@@ -3,19 +3,20 @@ Unified contractor bot: lead follow-up + missed call + universal webhook adapter
 One file. Config-driven. Switch businesses by editing business_config.json.
 """
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from datetime import datetime, timedelta
+from fastapi.responses import Response
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from twilio.rest import Client as TwilioClient
 from twilio.base.exceptions import TwilioRestException
+from twilio.request_validator import RequestValidator
+from twilio.twiml.voice_response import VoiceResponse
 import os
 import json
 import time
 import logging
 import hmac
-import hashlib
 from collections import defaultdict
 from dotenv import load_dotenv
 
@@ -26,10 +27,14 @@ logger = logging.getLogger("unified_bot")
 
 app = FastAPI()
 
-# Security middleware
+# CORS — set CORS_ORIGINS to a comma-separated list of allowed origins (e.g. https://yourdomain.com)
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if not CORS_ORIGINS:
+    logger.warning("CORS_ORIGINS not set — cross-origin requests will be blocked")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact domains
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -42,9 +47,11 @@ RATE_LIMIT_WINDOW = 60  # seconds
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "business_config.json")
 
+
 def load_config() -> dict:
     with open(_CONFIG_PATH, "r") as f:
         return json.load(f)
+
 
 CONFIG = load_config()
 
@@ -53,6 +60,11 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+# Full public URL of this app (e.g. https://your-app.onrender.com).
+# Required for Twilio webhook signature validation on /reply and /voice/* endpoints.
+APP_BASE_URL = os.getenv("APP_BASE_URL")
+# Set TEST_MODE=true to skip real SMS sends and DB writes during development/testing.
+TEST_MODE = os.getenv("TEST_MODE", "").lower() in ("1", "true", "yes")
 
 # Validate critical environment variables
 missing = []
@@ -65,10 +77,18 @@ if not WEBHOOK_SECRET: missing.append("WEBHOOK_SECRET")
 if missing:
     raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
+if not APP_BASE_URL:
+    logger.warning("APP_BASE_URL not set — Twilio webhook signature validation is disabled")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+twilio_validator = RequestValidator(TWILIO_TOKEN)
 
 _cooldown = {}
+
+# Carrier-standard opt-out keywords (TCPA compliance)
+OPT_OUT_KEYWORDS = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
+
 
 def _mask_phone(phone: str) -> str:
     """Mask phone number for logging (show only first 3 and last 2 digits)"""
@@ -76,43 +96,55 @@ def _mask_phone(phone: str) -> str:
         return "***"
     return phone[:3] + "***" + phone[-2:]
 
+
 def _check_rate_limit(client_ip: str) -> bool:
     """Check if client has exceeded rate limit"""
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
-    
+
     # Clean old requests
     _rate_limit_store[client_ip] = [
-        timestamp for timestamp in _rate_limit_store[client_ip] 
+        timestamp for timestamp in _rate_limit_store[client_ip]
         if timestamp > window_start
     ]
-    
+
     # Check if limit exceeded
     if len(_rate_limit_store[client_ip]) >= RATE_LIMIT_REQUESTS:
         return False
-    
+
     # Add current request
     _rate_limit_store[client_ip].append(now)
     return True
 
-def _validate_secret(request: Request, query_secret: str = None):
+
+def _validate_secret(request: Request):
+    """Validate the x-webhook-secret header using constant-time comparison."""
     header_secret = request.headers.get("x-webhook-secret")
     if not WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="Server configuration error")
-    
+
     def compare_secrets(a: str, b: str) -> bool:
         if not a or not b:
             return False
         return hmac.compare_digest(a.encode(), b.encode())
-    
-    if not (compare_secrets(header_secret, WEBHOOK_SECRET) or compare_secrets(query_secret, WEBHOOK_SECRET)):
+
+    if not compare_secrets(header_secret, WEBHOOK_SECRET):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-class LeadPayload(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
-    phone: str = Field(..., pattern=r"^+?[1-9]\d{1,14}$")
-    service: str = Field(default="", max_length=200)
-    source: str = Field(default="website", max_length=50)
+
+def _validate_twilio_signature(request: Request, form_params: dict):
+    """Validate that inbound requests genuinely originate from Twilio.
+
+    Requires APP_BASE_URL to be set. If not set, validation is skipped (a warning
+    is logged at startup).
+    """
+    if not APP_BASE_URL:
+        return
+    signature = request.headers.get("X-Twilio-Signature", "")
+    url = APP_BASE_URL.rstrip("/") + str(request.url.path)
+    if not twilio_validator.validate(url, form_params, signature):
+        raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
 
 def _parse_generic(body: dict) -> dict:
     return {
@@ -229,11 +261,10 @@ def _template(template_name: str, **kwargs) -> str:
 
 def send_sms(to: str, body: str):
     try:
-        # Skip actual SMS sending in test mode
-        if "test" in str(TWILIO_SID).lower() or "test" in str(TWILIO_TOKEN).lower():
+        if TEST_MODE:
             logger.info(f"Test mode: would send SMS to {_mask_phone(to)}: {body[:50]}...")
             return
-            
+
         twilio_client.messages.create(
             to=to,
             from_=CONFIG["twilio_phone"],
@@ -273,7 +304,16 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
     phone = _normalize_phone(parsed["phone"])
     service = parsed.get("service", "") or "our services"
     source = parsed.get("source", "website")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+
+    # Deduplicate: skip if an active lead already exists for this phone
+    try:
+        existing = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
+        if existing.data:
+            logger.info("Duplicate lead ignored: phone=%s", _mask_phone(phone))
+            return {"status": "duplicate", "touch": 0, "source": source}
+    except Exception as e:
+        logger.error(f"Dedup check failed: {e}")
 
     lead_data = {
         "business_id": CONFIG["business_id"],
@@ -281,6 +321,7 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
         "phone": phone,
         "service": service,
         "source": source,
+        "consent_source": source,
         "status": "new",
         "touch_count": 1,
         "created_at": now.isoformat(),
@@ -298,21 +339,23 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
     logger.info("Lead accepted: phone=%s source=%s", _mask_phone(phone), source)
     return {"status": "accepted", "touch": 1, "source": source}
 
+
 @app.get("/process-followups")
-async def process_followups(request: Request, secret: str = Query(None)):
+async def process_followups(request: Request):
+    """Cron-triggered endpoint. Pass the webhook secret via the x-webhook-secret header."""
     client_ip = request.client.host
     if not _check_rate_limit(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
-    _validate_secret(request, query_secret=secret)
-    now = datetime.utcnow().isoformat()
+
+    _validate_secret(request)
+    now = datetime.now(timezone.utc).isoformat()
 
     try:
         resp = supabase.table("leads").select("*").eq("status", "new").eq("business_id", CONFIG["business_id"]).lte("next_followup_at", now).execute()
         leads = resp.data or []
     except Exception as e:
         logger.error(f"DB query failed: {e}")
-        if "test" not in str(SUPABASE_URL).lower():
+        if not TEST_MODE:
             raise HTTPException(status_code=500, detail="Database operation failed")
         else:
             logger.warning("Test mode: skipping database query")
@@ -332,8 +375,11 @@ async def process_followups(request: Request, secret: str = Query(None)):
         elif touch == 2:
             body = _template("followup_24h", name=name, service=service)
             next_delta = timedelta(hours=48)
+        elif touch == 3:
+            body = _template("followup_72h", name=name, service=service)
+            next_delta = None  # Final touch — lead will be closed after sending
         else:
-            if "test" not in str(SUPABASE_URL).lower():
+            if not TEST_MODE:
                 supabase.table("leads").update({"status": "closed", "next_followup_at": None}).eq("id", lead_id).execute()
             else:
                 logger.warning("Test mode: skipping database update")
@@ -341,14 +387,26 @@ async def process_followups(request: Request, secret: str = Query(None)):
             continue
 
         send_sms(phone, body)
-        next_time = datetime.utcnow() + next_delta
-        if "test" not in str(SUPABASE_URL).lower():
-            supabase.table("leads").update({
-                "touch_count": touch + 1,
-                "next_followup_at": next_time.isoformat()
-            }).eq("id", lead_id).execute()
+
+        if next_delta is not None:
+            next_time = datetime.now(timezone.utc) + next_delta
+            if not TEST_MODE:
+                supabase.table("leads").update({
+                    "touch_count": touch + 1,
+                    "next_followup_at": next_time.isoformat()
+                }).eq("id", lead_id).execute()
+            else:
+                logger.warning("Test mode: skipping database update")
         else:
-            logger.warning("Test mode: skipping database update")
+            # Final follow-up sent — close the lead
+            if not TEST_MODE:
+                supabase.table("leads").update({
+                    "touch_count": touch + 1,
+                    "status": "closed",
+                    "next_followup_at": None
+                }).eq("id", lead_id).execute()
+            else:
+                logger.warning("Test mode: skipping database update")
         processed += 1
 
     logger.info("Processed %s follow-ups", processed)
@@ -359,19 +417,36 @@ async def handle_reply(request: Request):
     client_ip = request.client.host
     if not _check_rate_limit(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
+
     form = await request.form()
+    form_params = dict(form)
+    _validate_twilio_signature(request, form_params)
+
     from_phone = form.get("From", "")
     body = form.get("Body", "")
 
     if not from_phone:
         return {"status": "ignored"}
 
+    # Handle opt-out keywords (TCPA compliance)
+    if body.strip().lower() in OPT_OUT_KEYWORDS:
+        try:
+            if not TEST_MODE:
+                supabase.table("leads").update({
+                    "status": "closed",
+                    "opted_out": True,
+                    "next_followup_at": None,
+                }).eq("phone", from_phone).eq("business_id", CONFIG["business_id"]).execute()
+            logger.info("Opt-out received from %s", _mask_phone(from_phone))
+        except Exception as e:
+            logger.error(f"Opt-out update failed: {e}")
+        return {"status": "opted_out"}
+
     try:
         resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "new").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
         if resp.data:
             lead_id = resp.data[0]["id"]
-            if "test" not in str(SUPABASE_URL).lower():
+            if not TEST_MODE:
                 supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
             else:
                 logger.warning("Test mode: skipping database update")
@@ -381,25 +456,29 @@ async def handle_reply(request: Request):
 
     return {"status": "ok"}
 
+
 @app.post("/voice/inbound")
 async def handle_inbound_call(request: Request):
     client_ip = request.client.host
     if not _check_rate_limit(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
-    from twilio.twiml import VoiceResponse
+
     form = await request.form()
+    form_params = dict(form)
+    _validate_twilio_signature(request, form_params)
+
     from_phone = form.get("From", "")
     call_status = form.get("CallStatus", "")
-    call_sid = form.get("CallSid", "")
-
-    if not from_phone:
-        return str(VoiceResponse())
-
-    if call_status in ("completed", "no-answer", "busy", "failed", "canceled"):
-        return _send_missed_text(from_phone, call_sid)
 
     resp = VoiceResponse()
+
+    if not from_phone:
+        return Response(content=str(resp), media_type="text/xml")
+
+    if call_status in ("completed", "no-answer", "busy", "failed", "canceled"):
+        _send_missed_text(from_phone, form.get("CallSid", ""))
+        return Response(content=str(resp), media_type="text/xml")
+
     resp.say(
         f"Hi, you have reached {CONFIG['owner_name']} with {CONFIG['business_name']}. I'm on a job site right now and can't take your call. "
         "Please leave your name, number, and what you need help with, and I will call you back within the hour. "
@@ -407,28 +486,36 @@ async def handle_inbound_call(request: Request):
     )
     resp.record(max_length=120, action="/voice/voicemail", method="POST")
     resp.say("We did not receive your recording. Please text us at this number and we will respond quickly.")
-    return str(resp)
+    return Response(content=str(resp), media_type="text/xml")
+
 
 @app.post("/voice/voicemail")
 async def handle_voicemail(request: Request):
     form = await request.form()
-    from_phone = form.get("From", "")
-    call_sid = form.get("CallSid", "")
-    if from_phone:
-        _send_missed_text(from_phone, call_sid)
-    from twilio.twiml import VoiceResponse
-    return str(VoiceResponse())
+    form_params = dict(form)
+    _validate_twilio_signature(request, form_params)
 
-def _send_missed_text(phone: str, call_sid: str):
-    from twilio.twiml import VoiceResponse
+    from_phone = form.get("From", "")
+    if from_phone:
+        _send_missed_text(from_phone, form.get("CallSid", ""))
+    return Response(content=str(VoiceResponse()), media_type="text/xml")
+
+
+def _send_missed_text(phone: str, call_sid: str) -> None:
+    """Send a missed-call follow-up SMS if the phone is not in cooldown."""
     cooldown_min = CONFIG.get("sms_cooldown_minutes", 15)
     now = time.time()
     last_sent = _cooldown.get(phone, 0)
     if (now - last_sent) < cooldown_min * 60:
         logger.info("SMS cooldown active for %s", _mask_phone(phone))
-        return str(VoiceResponse())
+        return
 
     body = _template("missed_call")
+    if TEST_MODE:
+        logger.info(f"Test mode: would send missed-call SMS to {_mask_phone(phone)}: {body[:50]}...")
+        _cooldown[phone] = now
+        return
+
     try:
         twilio_client.messages.create(to=phone, from_=CONFIG["twilio_phone"], body=body)
         _cooldown[phone] = now
@@ -437,13 +524,14 @@ def _send_missed_text(phone: str, call_sid: str):
         logger.error(f"Twilio SMS error: {e.code}")
     except Exception as e:
         logger.error(f"SMS send failed: {type(e).__name__}")
-    return str(VoiceResponse())
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "business": CONFIG["business_name"], "business_id": CONFIG["business_id"]}
+    return {"status": "ok", "business": CONFIG["business_name"]}
+
 
 @app.get("/config")
-async def get_config(request: Request, secret: str = Query(None)):
-    _validate_secret(request, query_secret=secret)
+async def get_config(request: Request):
+    """Returns current config. Pass the webhook secret via the x-webhook-secret header."""
+    _validate_secret(request)
     return {"business": CONFIG, "sources": list(PARSERS.keys())}
