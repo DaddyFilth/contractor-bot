@@ -30,8 +30,9 @@ CREATE INDEX IF NOT EXISTS idx_leads_business ON leads(business_id, status, next
 
 -- Prevent duplicate active leads for the same phone number per business.
 -- A new lead can only be inserted once the previous one has been closed or responded to.
+-- Note: predicate uses NOT IN to avoid the reserved keyword 'new' in the WHERE clause.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_unique_active
-    ON leads(business_id, phone) WHERE status = 'new';
+    ON leads(business_id, phone) WHERE status NOT IN ('responded', 'closed');
 
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE business_configs ENABLE ROW LEVEL SECURITY;
