@@ -87,11 +87,18 @@ twilio_validator = RequestValidator(TWILIO_TOKEN)
 
 _cooldown = {}
 
-# Lock for thread-safe config hot-reload
-_config_reload_lock = asyncio.Lock()
+# Lock for thread-safe config hot-reload (initialised in startup to ensure it
+# is bound to the running event loop).
+_config_reload_lock: asyncio.Lock | None = None
 
 # Carrier-standard opt-out keywords (TCPA compliance)
 OPT_OUT_KEYWORDS = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
+
+
+@app.on_event("startup")
+async def startup_event():
+    global _config_reload_lock
+    _config_reload_lock = asyncio.Lock()
 
 
 def _mask_phone(phone: str) -> str:
@@ -316,7 +323,7 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
         try:
             opted_out_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("opted_out", True).limit(1).execute()
             if opted_out_check.data:
-                logger.info("Lead rejected: phone previously opted out")
+                logger.info("Lead rejected: phone previously opted out (TCPA compliance)")
                 return {"status": "opted_out", "touch": 0, "source": source}
             dedup_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
             if dedup_check.data:
@@ -462,7 +469,7 @@ async def handle_reply(request: Request):
             if resp.data:
                 lead_id = resp.data[0]["id"]
                 supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
-                logger.info("Lead responded: id=%s", str(lead_id)[:8])
+                logger.info("Lead responded: id=%s phone=%s", str(lead_id)[:8], _mask_phone(from_phone))
         else:
             logger.info("Test mode: skipping reply DB update for %s", _mask_phone(from_phone))
     except Exception as e:
@@ -547,7 +554,12 @@ async def health():
 @app.post("/config/reload")
 async def reload_config(request: Request):
     """Hot-reload business_config.json without restarting the server.
-    Pass the webhook secret via the x-webhook-secret header."""
+    Pass the webhook secret via the x-webhook-secret header.
+
+    FastAPI runs on a single-threaded asyncio event loop, so global dict
+    re-assignment is cooperative-safe. The lock prevents concurrent reload
+    calls from racing each other.
+    """
     _validate_secret(request)
     async with _config_reload_lock:
         global CONFIG
