@@ -325,7 +325,7 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
             if opted_out_check.data:
                 logger.info("Lead rejected: phone previously opted out (TCPA compliance)")
                 return {"status": "opted_out", "touch": 0, "source": source}
-            dedup_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
+            dedup_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "open").limit(1).execute()
             if dedup_check.data:
                 logger.info("Duplicate lead ignored")
                 return {"status": "duplicate", "touch": 0, "source": source}
@@ -339,7 +339,7 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
         "service": service,
         "source": source,
         "consent_source": source,
-        "status": "new",
+        "status": "open",
         "touch_count": 1,
         "created_at": now.isoformat(),
         "next_followup_at": (now + timedelta(hours=2)).isoformat(),
@@ -372,7 +372,7 @@ async def process_followups(request: Request):
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        resp = supabase.table("leads").select("*").eq("status", "new").eq("business_id", CONFIG["business_id"]).eq("opted_out", False).lte("next_followup_at", now).execute()
+        resp = supabase.table("leads").select("*").eq("status", "open").eq("business_id", CONFIG["business_id"]).eq("opted_out", False).lte("next_followup_at", now).execute()
         leads = resp.data or []
     except Exception as e:
         logger.error(f"DB query failed: {e}")
@@ -465,7 +465,7 @@ async def handle_reply(request: Request):
 
     try:
         if not TEST_MODE:
-            resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "new").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
+            resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "open").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
             if resp.data:
                 lead_id = resp.data[0]["id"]
                 supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
