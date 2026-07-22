@@ -82,14 +82,14 @@ if not APP_BASE_URL:
 
 supabase: Client | None = None
 twilio_client: TwilioClient | None = None
+twilio_validator: RequestValidator | None = None
 
 if TEST_MODE:
     logger.info("TEST_MODE enabled — skipping Supabase and Twilio client initialization")
 else:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
-
-twilio_validator = RequestValidator(TWILIO_TOKEN or "")
+    twilio_validator = RequestValidator(TWILIO_TOKEN)
 
 _cooldown = {}
 
@@ -127,7 +127,7 @@ def _check_rate_limit(client_ip: str) -> bool:
         return True
 
     try:
-        resp = supabase.rpc("check_rate_limit", {
+        resp = _require_supabase().rpc("check_rate_limit", {
             "p_ip": client_ip,
             "p_limit": RATE_LIMIT_REQUESTS,
             "p_window_seconds": RATE_LIMIT_WINDOW,
@@ -159,12 +159,24 @@ def _validate_twilio_signature(request: Request, form_params: dict):
     Requires APP_BASE_URL to be set. If not set, validation is skipped (a warning
     is logged at startup).
     """
-    if not APP_BASE_URL:
+    if TEST_MODE or not APP_BASE_URL or not twilio_validator:
         return
     signature = request.headers.get("X-Twilio-Signature", "")
     url = APP_BASE_URL.rstrip("/") + str(request.url.path)
     if not twilio_validator.validate(url, form_params, signature):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
+
+def _require_supabase() -> Client:
+    if supabase is None:
+        raise RuntimeError("Supabase client is not initialized")
+    return supabase
+
+
+def _require_twilio_client() -> TwilioClient:
+    if twilio_client is None:
+        raise RuntimeError("Twilio client is not initialized")
+    return twilio_client
 
 
 def _parse_generic(body: dict) -> dict:
@@ -286,7 +298,7 @@ def send_sms(to: str, body: str):
             logger.info(f"Test mode: would send SMS to {_mask_phone(to)}: {body[:50]}...")
             return
 
-        twilio_client.messages.create(
+        _require_twilio_client().messages.create(
             to=to,
             from_=CONFIG["twilio_phone"],
             body=body[:1600]
@@ -330,12 +342,13 @@ async def _process_lead(parsed: dict):
     # Block reinsertion for phones that previously opted out (TCPA compliance)
     # Also deduplicate: skip if an active lead already exists for this phone
     if not TEST_MODE:
+        db = _require_supabase()
         try:
-            opted_out_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("opted_out", True).limit(1).execute()
+            opted_out_check = db.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("opted_out", True).limit(1).execute()
             if opted_out_check.data:
                 logger.info("Lead rejected: phone previously opted out (TCPA compliance)")
                 return {"status": "opted_out", "touch": 0, "source": source}
-            dedup_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "open").limit(1).execute()
+            dedup_check = db.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "open").limit(1).execute()
             if dedup_check.data:
                 logger.info("Duplicate lead ignored")
                 return {"status": "duplicate", "touch": 0, "source": source}
@@ -356,8 +369,9 @@ async def _process_lead(parsed: dict):
     }
 
     if not TEST_MODE:
+        db = _require_supabase()
         try:
-            supabase.table("leads").insert(lead_data).execute()
+            db.table("leads").insert(lead_data).execute()
         except Exception as e:
             logger.error(f"DB insert failed: {e}")
             raise HTTPException(status_code=500, detail="Database operation failed")
@@ -386,16 +400,16 @@ async def process_followups(request: Request):
     _validate_secret(request)
     now = datetime.now(timezone.utc).isoformat()
 
-    try:
-        resp = supabase.table("leads").select("*").eq("status", "open").eq("business_id", CONFIG["business_id"]).eq("opted_out", False).lte("next_followup_at", now).execute()
-        leads = resp.data or []
-    except Exception as e:
-        logger.error(f"DB query failed: {e}")
-        if not TEST_MODE:
+    if TEST_MODE:
+        logger.warning("Test mode: skipping database query")
+        leads = []
+    else:
+        try:
+            resp = _require_supabase().table("leads").select("*").eq("status", "open").eq("business_id", CONFIG["business_id"]).eq("opted_out", False).lte("next_followup_at", now).execute()
+            leads = resp.data or []
+        except Exception as e:
+            logger.error(f"DB query failed: {e}")
             raise HTTPException(status_code=500, detail="Database operation failed")
-        else:
-            logger.warning("Test mode: skipping database query")
-            leads = []
 
     processed = 0
     for lead in leads:
@@ -416,7 +430,7 @@ async def process_followups(request: Request):
             next_delta = None  # Final touch — lead will be closed after sending
         else:
             if not TEST_MODE:
-                supabase.table("leads").update({"status": "closed", "next_followup_at": None}).eq("id", lead_id).execute()
+                _require_supabase().table("leads").update({"status": "closed", "next_followup_at": None}).eq("id", lead_id).execute()
             else:
                 logger.warning("Test mode: skipping database update")
             logger.info("Lead closed: id=%s", str(lead_id)[:8])
@@ -427,7 +441,7 @@ async def process_followups(request: Request):
         if next_delta is not None:
             next_time = datetime.now(timezone.utc) + next_delta
             if not TEST_MODE:
-                supabase.table("leads").update({
+                _require_supabase().table("leads").update({
                     "touch_count": touch + 1,
                     "next_followup_at": next_time.isoformat()
                 }).eq("id", lead_id).execute()
@@ -436,7 +450,7 @@ async def process_followups(request: Request):
         else:
             # Final follow-up sent — close the lead
             if not TEST_MODE:
-                supabase.table("leads").update({
+                _require_supabase().table("leads").update({
                     "touch_count": touch + 1,
                     "status": "closed",
                     "next_followup_at": None
@@ -468,7 +482,7 @@ async def handle_reply(request: Request):
     if body.strip().lower() in OPT_OUT_KEYWORDS:
         try:
             if not TEST_MODE:
-                supabase.table("leads").update({
+                _require_supabase().table("leads").update({
                     "status": "closed",
                     "opted_out": True,
                     "next_followup_at": None,
@@ -480,10 +494,10 @@ async def handle_reply(request: Request):
 
     try:
         if not TEST_MODE:
-            resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "open").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
+            resp = _require_supabase().table("leads").select("id").eq("phone", from_phone).eq("status", "open").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
             if resp.data:
                 lead_id = resp.data[0]["id"]
-                supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
+                _require_supabase().table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
                 logger.info("Lead responded: id=%s phone=%s", str(lead_id)[:8], _mask_phone(from_phone))
         else:
             logger.info("Test mode: skipping reply DB update for %s", _mask_phone(from_phone))
@@ -553,7 +567,7 @@ def _send_missed_text(phone: str, call_sid: str) -> None:
         return
 
     try:
-        twilio_client.messages.create(to=phone, from_=CONFIG["twilio_phone"], body=body)
+        _require_twilio_client().messages.create(to=phone, from_=CONFIG["twilio_phone"], body=body)
         _cooldown[phone] = now
         logger.info("Missed-call SMS sent to %s", _mask_phone(phone))
     except TwilioRestException as e:
