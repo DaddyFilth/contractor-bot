@@ -29,7 +29,8 @@ CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_business ON leads(business_id, status, next_followup_at);
 
 -- Prevent duplicate active leads for the same phone number per business.
--- A lead can only be inserted once the previous one has been closed or responded to.
+-- Only one 'open' lead per phone/business is allowed; a new lead can be
+-- inserted once the previous one has been closed or responded to.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_unique_active
     ON leads(business_id, phone) WHERE status = 'open';
 
