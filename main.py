@@ -67,11 +67,12 @@ TEST_MODE = os.getenv("TEST_MODE", "").lower() in ("1", "true", "yes")
 
 # Validate critical environment variables
 missing = []
-if not SUPABASE_URL: missing.append("SUPABASE_URL")
-if not SUPABASE_SERVICE_KEY: missing.append("SUPABASE_SERVICE_KEY")
-if not TWILIO_SID: missing.append("TWILIO_SID")
-if not TWILIO_TOKEN: missing.append("TWILIO_TOKEN")
 if not WEBHOOK_SECRET: missing.append("WEBHOOK_SECRET")
+if not TEST_MODE:
+    if not SUPABASE_URL: missing.append("SUPABASE_URL")
+    if not SUPABASE_SERVICE_KEY: missing.append("SUPABASE_SERVICE_KEY")
+    if not TWILIO_SID: missing.append("TWILIO_SID")
+    if not TWILIO_TOKEN: missing.append("TWILIO_TOKEN")
 
 if missing:
     raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
@@ -79,9 +80,16 @@ if missing:
 if not APP_BASE_URL:
     logger.warning("APP_BASE_URL not set — Twilio webhook signature validation is disabled")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
-twilio_validator = RequestValidator(TWILIO_TOKEN)
+supabase: Client | None = None
+twilio_client: TwilioClient | None = None
+
+if TEST_MODE:
+    logger.info("TEST_MODE enabled — skipping Supabase and Twilio client initialization")
+else:
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+
+twilio_validator = RequestValidator(TWILIO_TOKEN or "")
 
 _cooldown = {}
 

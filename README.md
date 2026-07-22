@@ -53,11 +53,10 @@ cp .env.example .env
 
 ### 3. Run in test mode
 
-`TEST_MODE=true` skips real SMS sends and database writes so you can iterate locally without external services.
+`TEST_MODE=true` skips real SMS sends, database writes, and external client initialization so you can iterate locally without external services.
 
 ```bash
-TEST_MODE=true SUPABASE_URL=x SUPABASE_SERVICE_KEY=x TWILIO_SID=x TWILIO_TOKEN=x WEBHOOK_SECRET=secret \
-  python -m uvicorn main:app --port 8000
+TEST_MODE=true WEBHOOK_SECRET=secret python -m uvicorn main:app --port 8000
 ```
 
 ### 4. Run the test suite
@@ -81,10 +80,10 @@ Additional flags:
 
 | Variable | Description |
 |----------|-------------|
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_SERVICE_KEY` | Supabase `service_role` key (Settings → API) |
-| `TWILIO_SID` | Twilio Account SID |
-| `TWILIO_TOKEN` | Twilio Auth Token |
+| `SUPABASE_URL` | Supabase project URL (required outside `TEST_MODE`) |
+| `SUPABASE_SERVICE_KEY` | Supabase `service_role` key (required outside `TEST_MODE`) |
+| `TWILIO_SID` | Twilio Account SID (required outside `TEST_MODE`) |
+| `TWILIO_TOKEN` | Twilio Auth Token (required outside `TEST_MODE`) |
 | `WEBHOOK_SECRET` | Random string (min 32 chars) — authenticates all webhook endpoints |
 | `APP_BASE_URL` | Full public URL of the deployed app (required for Twilio signature validation) |
 | `CORS_ORIGINS` | Comma-separated allowed origins (e.g. `https://yourdomain.com`) |

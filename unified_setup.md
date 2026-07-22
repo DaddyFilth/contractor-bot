@@ -137,9 +137,8 @@ All endpoints require the header `x-webhook-secret: <your WEBHOOK_SECRET>`.
 # Install dependencies
 pip install -r requirements.txt
 
-# Start in test mode (no real SMS or DB writes)
-TEST_MODE=true SUPABASE_URL=x SUPABASE_SERVICE_KEY=x TWILIO_SID=x TWILIO_TOKEN=x WEBHOOK_SECRET=secret \
-  python -m uvicorn main:app --port 8000
+# Start in test mode (no real SMS, DB writes, or external client init)
+TEST_MODE=true WEBHOOK_SECRET=secret python -m uvicorn main:app --port 8000
 
 # Run the test suite
 python test_webhook.py --url http://localhost:8000 --secret secret
