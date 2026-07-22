@@ -7,12 +7,24 @@
         "runtime": "python3.12",
         "includeFiles": ["main.py", "business_config.json"]
       }
+    },
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/next"
     }
   ],
   "routes": [
     {
-      "src": "/(.*)",
+      "src": "/(webhook|reply|voice|health|process-followups)(.*)",
       "dest": "api/index.py"
+    },
+    {
+      "src": "/config/reload(.*)",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "frontend/$1"
     }
   ]
 }

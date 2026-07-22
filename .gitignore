@@ -20,3 +20,8 @@ nohup.out
 
 # OS
 .DS_Store
+
+# Frontend (Next.js)
+frontend/.next/
+frontend/node_modules/
+frontend/out/
