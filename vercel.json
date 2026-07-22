@@ -2,7 +2,11 @@
   "builds": [
     {
       "src": "api/index.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "runtime": "python3.12",
+        "includeFiles": ["main.py", "business_config.json"]
+      }
     }
   ],
   "routes": [
