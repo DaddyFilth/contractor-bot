@@ -14,6 +14,7 @@ from twilio.request_validator import RequestValidator
 from twilio.twiml.voice_response import VoiceResponse
 import os
 import json
+import asyncio
 import time
 import logging
 import hmac
@@ -85,6 +86,9 @@ twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
 twilio_validator = RequestValidator(TWILIO_TOKEN)
 
 _cooldown = {}
+
+# Lock for thread-safe config hot-reload
+_config_reload_lock = asyncio.Lock()
 
 # Carrier-standard opt-out keywords (TCPA compliance)
 OPT_OUT_KEYWORDS = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
@@ -306,19 +310,18 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
     source = parsed.get("source", "website")
     now = datetime.now(timezone.utc)
 
-    # Deduplicate: skip if an active lead already exists for this phone
-    # Also block reinsertion for phones that previously opted out (TCPA compliance)
+    # Block reinsertion for phones that previously opted out (TCPA compliance)
+    # Also deduplicate: skip if an active lead already exists for this phone
     if not TEST_MODE:
         try:
-            existing = supabase.table("leads").select("id,opted_out,status").eq("phone", phone).eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
-            if existing.data:
-                row = existing.data[0]
-                if row.get("opted_out"):
-                    logger.info("Lead rejected: phone previously opted out (%s)", _mask_phone(phone))
-                    return {"status": "opted_out", "touch": 0, "source": source}
-                if row.get("status") == "new":
-                    logger.info("Duplicate lead ignored")
-                    return {"status": "duplicate", "touch": 0, "source": source}
+            opted_out_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("opted_out", True).limit(1).execute()
+            if opted_out_check.data:
+                logger.info("Lead rejected: phone previously opted out")
+                return {"status": "opted_out", "touch": 0, "source": source}
+            dedup_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
+            if dedup_check.data:
+                logger.info("Duplicate lead ignored")
+                return {"status": "duplicate", "touch": 0, "source": source}
         except Exception as e:
             logger.error(f"Dedup check failed: {e}")
 
@@ -546,8 +549,9 @@ async def reload_config(request: Request):
     """Hot-reload business_config.json without restarting the server.
     Pass the webhook secret via the x-webhook-secret header."""
     _validate_secret(request)
-    global CONFIG
-    CONFIG = load_config()
+    async with _config_reload_lock:
+        global CONFIG
+        CONFIG = load_config()
     logger.info("Config reloaded: business=%s", CONFIG.get("business_name"))
     return {"status": "reloaded", "business": CONFIG["business_name"]}
 
