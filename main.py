@@ -109,37 +109,22 @@ def _mask_phone(phone: str) -> str:
 def _check_rate_limit(client_ip: str) -> bool:
     """Check if client has exceeded rate limit.
 
-    Uses the Supabase ``rate_limits`` table so the counter survives across
-    serverless invocations (e.g. Vercel).  Falls open on any DB error to avoid
-    blocking legitimate traffic.
+    Calls the ``check_rate_limit`` Postgres function via Supabase RPC so the
+    check-and-increment is a single atomic operation.  This avoids the
+    read-then-write race condition of a separate SELECT + UPDATE and works
+    correctly across serverless invocations (e.g. Vercel).  Falls open on any
+    DB error to avoid blocking legitimate traffic.
     """
     if TEST_MODE:
         return True
 
-    now = datetime.now(timezone.utc)
-    window_cutoff = now - timedelta(seconds=RATE_LIMIT_WINDOW)
-
     try:
-        resp = supabase.table("rate_limits").select("window_start,request_count").eq("ip", client_ip).limit(1).execute()
-        row = resp.data[0] if resp.data else None
-
-        if row is None or datetime.fromisoformat(row["window_start"]).astimezone(timezone.utc) < window_cutoff:
-            # No row yet, or the previous window has expired — start a fresh window.
-            supabase.table("rate_limits").upsert({
-                "ip": client_ip,
-                "window_start": now.isoformat(),
-                "request_count": 1,
-            }).execute()
-            return True
-
-        if row["request_count"] >= RATE_LIMIT_REQUESTS:
-            return False
-
-        # Still within the window — increment the counter.
-        supabase.table("rate_limits").update({
-            "request_count": row["request_count"] + 1,
-        }).eq("ip", client_ip).execute()
-        return True
+        resp = supabase.rpc("check_rate_limit", {
+            "p_ip": client_ip,
+            "p_limit": RATE_LIMIT_REQUESTS,
+            "p_window_seconds": RATE_LIMIT_WINDOW,
+        }).execute()
+        return bool(resp.data)
     except Exception as e:
         logger.error(f"Rate limit check failed: {e}")
         return True  # Fail open to avoid blocking legitimate requests on DB error
