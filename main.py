@@ -14,6 +14,7 @@ from twilio.request_validator import RequestValidator
 from twilio.twiml.voice_response import VoiceResponse
 import os
 import json
+import asyncio
 import time
 import logging
 import hmac
@@ -86,8 +87,18 @@ twilio_validator = RequestValidator(TWILIO_TOKEN)
 
 _cooldown = {}
 
+# Lock for thread-safe config hot-reload (initialised in startup to ensure it
+# is bound to the running event loop).
+_config_reload_lock: asyncio.Lock | None = None
+
 # Carrier-standard opt-out keywords (TCPA compliance)
 OPT_OUT_KEYWORDS = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
+
+
+@app.on_event("startup")
+async def startup_event():
+    global _config_reload_lock
+    _config_reload_lock = asyncio.Lock()
 
 
 def _mask_phone(phone: str) -> str:
@@ -306,11 +317,16 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
     source = parsed.get("source", "website")
     now = datetime.now(timezone.utc)
 
-    # Deduplicate: skip if an active lead already exists for this phone
+    # Block reinsertion for phones that previously opted out (TCPA compliance)
+    # Also deduplicate: skip if an active lead already exists for this phone
     if not TEST_MODE:
         try:
-            existing = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
-            if existing.data:
+            opted_out_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("opted_out", True).limit(1).execute()
+            if opted_out_check.data:
+                logger.info("Lead rejected: phone previously opted out (TCPA compliance)")
+                return {"status": "opted_out", "touch": 0, "source": source}
+            dedup_check = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
+            if dedup_check.data:
                 logger.info("Duplicate lead ignored")
                 return {"status": "duplicate", "touch": 0, "source": source}
         except Exception as e:
@@ -356,7 +372,7 @@ async def process_followups(request: Request):
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        resp = supabase.table("leads").select("*").eq("status", "new").eq("business_id", CONFIG["business_id"]).lte("next_followup_at", now).execute()
+        resp = supabase.table("leads").select("*").eq("status", "new").eq("business_id", CONFIG["business_id"]).eq("opted_out", False).lte("next_followup_at", now).execute()
         leads = resp.data or []
     except Exception as e:
         logger.error(f"DB query failed: {e}")
@@ -448,14 +464,14 @@ async def handle_reply(request: Request):
         return {"status": "opted_out"}
 
     try:
-        resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "new").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
-        if resp.data:
-            lead_id = resp.data[0]["id"]
-            if not TEST_MODE:
+        if not TEST_MODE:
+            resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "new").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
+            if resp.data:
+                lead_id = resp.data[0]["id"]
                 supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
-            else:
-                logger.warning("Test mode: skipping database update")
-            logger.info("Lead responded: id=%s", str(lead_id)[:8])
+                logger.info("Lead responded: id=%s phone=%s", str(lead_id)[:8], _mask_phone(from_phone))
+        else:
+            logger.info("Test mode: skipping reply DB update for %s", _mask_phone(from_phone))
     except Exception as e:
         logger.error(f"Reply handling failed: {e}")
 
@@ -533,6 +549,23 @@ def _send_missed_text(phone: str, call_sid: str) -> None:
 @app.get("/health")
 async def health():
     return {"status": "ok", "business": CONFIG["business_name"]}
+
+
+@app.post("/config/reload")
+async def reload_config(request: Request):
+    """Hot-reload business_config.json without restarting the server.
+    Pass the webhook secret via the x-webhook-secret header.
+
+    FastAPI runs on a single-threaded asyncio event loop, so global dict
+    re-assignment is cooperative-safe. The lock prevents concurrent reload
+    calls from racing each other.
+    """
+    _validate_secret(request)
+    async with _config_reload_lock:
+        global CONFIG
+        CONFIG = load_config()
+    logger.info("Config reloaded: business=%s", CONFIG.get("business_name"))
+    return {"status": "reloaded", "business": CONFIG["business_name"]}
 
 
 @app.get("/config")
