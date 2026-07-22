@@ -159,7 +159,9 @@ def _validate_twilio_signature(request: Request, form_params: dict):
     Requires APP_BASE_URL to be set. If not set, validation is skipped (a warning
     is logged at startup).
     """
-    if TEST_MODE or not APP_BASE_URL or not twilio_validator:
+    if TEST_MODE:
+        return
+    if not APP_BASE_URL or not twilio_validator:
         return
     signature = request.headers.get("X-Twilio-Signature", "")
     url = APP_BASE_URL.rstrip("/") + str(request.url.path)
@@ -400,16 +402,16 @@ async def process_followups(request: Request):
     _validate_secret(request)
     now = datetime.now(timezone.utc).isoformat()
 
-    if TEST_MODE:
-        logger.warning("Test mode: skipping database query")
-        leads = []
-    else:
+    if not TEST_MODE:
         try:
             resp = _require_supabase().table("leads").select("*").eq("status", "open").eq("business_id", CONFIG["business_id"]).eq("opted_out", False).lte("next_followup_at", now).execute()
             leads = resp.data or []
         except Exception as e:
             logger.error(f"DB query failed: {e}")
             raise HTTPException(status_code=500, detail="Database operation failed")
+    else:
+        logger.warning("Test mode: skipping database query")
+        leads = []
 
     processed = 0
     for lead in leads:
