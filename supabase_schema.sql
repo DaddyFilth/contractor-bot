@@ -49,3 +49,39 @@ CREATE TABLE IF NOT EXISTS rate_limits (
     window_start TIMESTAMPTZ NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 1
 );
+
+-- Atomic rate-limit check-and-increment.
+-- Inserts a fresh window row on first request or after expiry; otherwise
+-- increments the counter in one statement using INSERT … ON CONFLICT DO UPDATE.
+-- Returns TRUE if the request is within the allowed limit, FALSE if it should
+-- be rejected.  Because the entire operation is a single SQL statement it is
+-- free of the read-then-write race condition that a separate SELECT + UPDATE
+-- would introduce.
+CREATE OR REPLACE FUNCTION check_rate_limit(
+    p_ip             TEXT,
+    p_limit          INTEGER DEFAULT 100,
+    p_window_seconds INTEGER DEFAULT 60
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    INSERT INTO rate_limits (ip, window_start, request_count)
+    VALUES (p_ip, NOW(), 1)
+    ON CONFLICT (ip) DO UPDATE SET
+        window_start   = CASE
+                             WHEN rate_limits.window_start < NOW() - (p_window_seconds || ' seconds')::INTERVAL
+                             THEN NOW()
+                             ELSE rate_limits.window_start
+                         END,
+        request_count  = CASE
+                             WHEN rate_limits.window_start < NOW() - (p_window_seconds || ' seconds')::INTERVAL
+                             THEN 1
+                             ELSE rate_limits.request_count + 1
+                         END
+    RETURNING request_count INTO v_count;
+
+    RETURN v_count <= p_limit;
+END;
+$$;
