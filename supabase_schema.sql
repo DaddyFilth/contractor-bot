@@ -40,3 +40,12 @@ ALTER TABLE business_configs ENABLE ROW LEVEL SECURITY;
 -- Migration: apply new columns to existing databases
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS consent_source TEXT;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS opted_out BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Rate limiting table — replaces in-memory store for serverless deployments (e.g. Vercel).
+-- One row per client IP; tracks the start of the current 60-second window and the
+-- number of requests recorded within it.
+CREATE TABLE IF NOT EXISTS rate_limits (
+    ip TEXT PRIMARY KEY,
+    window_start TIMESTAMPTZ NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 1
+);
