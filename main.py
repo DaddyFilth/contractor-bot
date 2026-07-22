@@ -5,7 +5,7 @@ One file. Config-driven. Switch businesses by editing business_config.json.
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
 from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from twilio.rest import Client as TwilioClient
@@ -576,6 +576,157 @@ def _send_missed_text(phone: str, call_sid: str) -> None:
         logger.error(f"Twilio SMS error: {e.code}")
     except Exception as e:
         logger.error(f"SMS send failed: {type(e).__name__}")
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Landing page with Vercel Web Analytics enabled."""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Contractor Bot API</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+            }
+            .container {
+                background: white;
+                border-radius: 16px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+                padding: 40px;
+                max-width: 600px;
+                width: 100%;
+            }
+            h1 {
+                color: #333;
+                margin-bottom: 10px;
+                font-size: 2rem;
+            }
+            .subtitle {
+                color: #666;
+                margin-bottom: 30px;
+                font-size: 1rem;
+            }
+            .status {
+                background: #10b981;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 8px;
+                display: inline-block;
+                margin-bottom: 30px;
+                font-weight: 600;
+            }
+            .endpoints {
+                background: #f9fafb;
+                border-radius: 8px;
+                padding: 20px;
+                margin-bottom: 20px;
+            }
+            .endpoints h2 {
+                color: #333;
+                font-size: 1.2rem;
+                margin-bottom: 15px;
+            }
+            .endpoint {
+                margin: 10px 0;
+                padding: 10px;
+                background: white;
+                border-radius: 6px;
+                border-left: 4px solid #667eea;
+            }
+            .endpoint-method {
+                display: inline-block;
+                background: #667eea;
+                color: white;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 0.75rem;
+                font-weight: 600;
+                margin-right: 10px;
+            }
+            .endpoint-path {
+                font-family: 'Courier New', monospace;
+                color: #333;
+                font-size: 0.9rem;
+            }
+            .footer {
+                text-align: center;
+                color: #666;
+                font-size: 0.9rem;
+                margin-top: 30px;
+            }
+            a {
+                color: #667eea;
+                text-decoration: none;
+            }
+            a:hover {
+                text-decoration: underline;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🔧 Contractor Bot API</h1>
+            <p class="subtitle">Lead follow-up & missed call automation system</p>
+            <div class="status">✓ Service Active</div>
+            
+            <div class="endpoints">
+                <h2>Available Endpoints</h2>
+                <div class="endpoint">
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/webhook/lead</span>
+                </div>
+                <div class="endpoint">
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/webhook/{source_type}</span>
+                </div>
+                <div class="endpoint">
+                    <span class="endpoint-method">GET</span>
+                    <span class="endpoint-path">/process-followups</span>
+                </div>
+                <div class="endpoint">
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/reply</span>
+                </div>
+                <div class="endpoint">
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/voice/inbound</span>
+                </div>
+                <div class="endpoint">
+                    <span class="endpoint-method">GET</span>
+                    <span class="endpoint-path">/health</span>
+                </div>
+            </div>
+            
+            <div class="footer">
+                <p>For API documentation, visit <a href="/docs">/docs</a></p>
+                <p style="margin-top: 10px;">Powered by FastAPI</p>
+            </div>
+        </div>
+        
+        <!-- Vercel Web Analytics -->
+        <script>
+            window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+        </script>
+        <script defer src="/_vercel/insights/script.js"></script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
 
 @app.get("/health")
 async def health():
