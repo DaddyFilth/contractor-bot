@@ -65,19 +65,20 @@ CREATE OR REPLACE FUNCTION check_rate_limit(
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_count INTEGER;
+    v_count  INTEGER;
+    v_cutoff TIMESTAMPTZ;
 BEGIN
+    v_cutoff := NOW() - (p_window_seconds || ' seconds')::INTERVAL;
+
     INSERT INTO rate_limits (ip, window_start, request_count)
     VALUES (p_ip, NOW(), 1)
     ON CONFLICT (ip) DO UPDATE SET
         window_start   = CASE
-                             WHEN rate_limits.window_start < NOW() - (p_window_seconds || ' seconds')::INTERVAL
-                             THEN NOW()
+                             WHEN rate_limits.window_start < v_cutoff THEN NOW()
                              ELSE rate_limits.window_start
                          END,
         request_count  = CASE
-                             WHEN rate_limits.window_start < NOW() - (p_window_seconds || ' seconds')::INTERVAL
-                             THEN 1
+                             WHEN rate_limits.window_start < v_cutoff THEN 1
                              ELSE rate_limits.request_count + 1
                          END
     RETURNING request_count INTO v_count;

@@ -358,6 +358,11 @@ async def _process_lead(parsed: dict):
         return {"status": "accepted", "touch": 1, "source": source}
 
     body = _template("instant", name=name, service=service)
+    # send_sms is called synchronously so the SMS is guaranteed to be sent
+    # before Vercel's serverless function exits.  The trade-off is that slow
+    # Twilio responses add latency to this endpoint.  send_sms already catches
+    # all Twilio exceptions internally, so a slow/failed send will not raise
+    # here; the lead record is already committed to the database at this point.
     send_sms(phone, body)
     logger.info("Lead accepted: phone=%s source=%s", _mask_phone(phone), source)
     return {"status": "accepted", "touch": 1, "source": source}
