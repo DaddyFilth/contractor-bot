@@ -307,12 +307,18 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
     now = datetime.now(timezone.utc)
 
     # Deduplicate: skip if an active lead already exists for this phone
+    # Also block reinsertion for phones that previously opted out (TCPA compliance)
     if not TEST_MODE:
         try:
-            existing = supabase.table("leads").select("id").eq("phone", phone).eq("business_id", CONFIG["business_id"]).eq("status", "new").limit(1).execute()
+            existing = supabase.table("leads").select("id,opted_out,status").eq("phone", phone).eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
             if existing.data:
-                logger.info("Duplicate lead ignored")
-                return {"status": "duplicate", "touch": 0, "source": source}
+                row = existing.data[0]
+                if row.get("opted_out"):
+                    logger.info("Lead rejected: phone previously opted out (%s)", _mask_phone(phone))
+                    return {"status": "opted_out", "touch": 0, "source": source}
+                if row.get("status") == "new":
+                    logger.info("Duplicate lead ignored")
+                    return {"status": "duplicate", "touch": 0, "source": source}
         except Exception as e:
             logger.error(f"Dedup check failed: {e}")
 
@@ -356,7 +362,7 @@ async def process_followups(request: Request):
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        resp = supabase.table("leads").select("*").eq("status", "new").eq("business_id", CONFIG["business_id"]).lte("next_followup_at", now).execute()
+        resp = supabase.table("leads").select("*").eq("status", "new").eq("business_id", CONFIG["business_id"]).eq("opted_out", False).lte("next_followup_at", now).execute()
         leads = resp.data or []
     except Exception as e:
         logger.error(f"DB query failed: {e}")
@@ -448,14 +454,14 @@ async def handle_reply(request: Request):
         return {"status": "opted_out"}
 
     try:
-        resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "new").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
-        if resp.data:
-            lead_id = resp.data[0]["id"]
-            if not TEST_MODE:
+        if not TEST_MODE:
+            resp = supabase.table("leads").select("id").eq("phone", from_phone).eq("status", "new").eq("business_id", CONFIG["business_id"]).order("created_at", desc=True).limit(1).execute()
+            if resp.data:
+                lead_id = resp.data[0]["id"]
                 supabase.table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
-            else:
-                logger.warning("Test mode: skipping database update")
-            logger.info("Lead responded: id=%s", str(lead_id)[:8])
+                logger.info("Lead responded: id=%s", str(lead_id)[:8])
+        else:
+            logger.info("Test mode: skipping reply DB update for %s", _mask_phone(from_phone))
     except Exception as e:
         logger.error(f"Reply handling failed: {e}")
 
@@ -533,6 +539,17 @@ def _send_missed_text(phone: str, call_sid: str) -> None:
 @app.get("/health")
 async def health():
     return {"status": "ok", "business": CONFIG["business_name"]}
+
+
+@app.post("/config/reload")
+async def reload_config(request: Request):
+    """Hot-reload business_config.json without restarting the server.
+    Pass the webhook secret via the x-webhook-secret header."""
+    _validate_secret(request)
+    global CONFIG
+    CONFIG = load_config()
+    logger.info("Config reloaded: business=%s", CONFIG.get("business_name"))
+    return {"status": "reloaded", "business": CONFIG["business_name"]}
 
 
 @app.get("/config")
