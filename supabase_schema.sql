@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS leads (
     service TEXT,
     source TEXT DEFAULT 'website',
     consent_source TEXT,
-    status TEXT DEFAULT 'new' CHECK (status IN ('new', 'responded', 'closed')),
+    status TEXT DEFAULT 'open' CHECK (status IN ('open', 'responded', 'closed')),
     opted_out BOOLEAN NOT NULL DEFAULT FALSE,
     touch_count INTEGER DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -29,9 +29,10 @@ CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_business ON leads(business_id, status, next_followup_at);
 
 -- Prevent duplicate active leads for the same phone number per business.
--- A new lead can only be inserted once the previous one has been closed or responded to.
+-- Only one 'open' lead per phone/business is allowed; a new lead can be
+-- inserted once the previous one has been closed or responded to.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_unique_active
-    ON leads(business_id, phone) WHERE status = 'new';
+    ON leads(business_id, phone) WHERE status = 'open';
 
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE business_configs ENABLE ROW LEVEL SECURITY;
