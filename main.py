@@ -3,7 +3,7 @@ Unified contractor bot: lead follow-up + missed call + universal webhook adapter
 One file. Config-driven. Switch businesses by editing business_config.json.
 """
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from datetime import datetime, timedelta, timezone
@@ -18,7 +18,6 @@ import asyncio
 import time
 import logging
 import hmac
-from collections import defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,7 +41,6 @@ app.add_middleware(
 )
 
 # Rate limiting
-_rate_limit_store = defaultdict(list)
 RATE_LIMIT_REQUESTS = 100
 RATE_LIMIT_WINDOW = 60  # seconds
 
@@ -61,7 +59,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-# Full public URL of this app (e.g. https://your-app.onrender.com).
+# Full public URL of this app (e.g. https://your-app.vercel.app).
 # Required for Twilio webhook signature validation on /reply and /voice/* endpoints.
 APP_BASE_URL = os.getenv("APP_BASE_URL")
 # Set TEST_MODE=true to skip real SMS sends and DB writes during development/testing.
@@ -109,23 +107,42 @@ def _mask_phone(phone: str) -> str:
 
 
 def _check_rate_limit(client_ip: str) -> bool:
-    """Check if client has exceeded rate limit"""
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW
+    """Check if client has exceeded rate limit.
 
-    # Clean old requests
-    _rate_limit_store[client_ip] = [
-        timestamp for timestamp in _rate_limit_store[client_ip]
-        if timestamp > window_start
-    ]
+    Uses the Supabase ``rate_limits`` table so the counter survives across
+    serverless invocations (e.g. Vercel).  Falls open on any DB error to avoid
+    blocking legitimate traffic.
+    """
+    if TEST_MODE:
+        return True
 
-    # Check if limit exceeded
-    if len(_rate_limit_store[client_ip]) >= RATE_LIMIT_REQUESTS:
-        return False
+    now = datetime.now(timezone.utc)
+    window_cutoff = now - timedelta(seconds=RATE_LIMIT_WINDOW)
 
-    # Add current request
-    _rate_limit_store[client_ip].append(now)
-    return True
+    try:
+        resp = supabase.table("rate_limits").select("window_start,request_count").eq("ip", client_ip).limit(1).execute()
+        row = resp.data[0] if resp.data else None
+
+        if row is None or datetime.fromisoformat(row["window_start"]).astimezone(timezone.utc) < window_cutoff:
+            # No row yet, or the previous window has expired — start a fresh window.
+            supabase.table("rate_limits").upsert({
+                "ip": client_ip,
+                "window_start": now.isoformat(),
+                "request_count": 1,
+            }).execute()
+            return True
+
+        if row["request_count"] >= RATE_LIMIT_REQUESTS:
+            return False
+
+        # Still within the window — increment the counter.
+        supabase.table("rate_limits").update({
+            "request_count": row["request_count"] + 1,
+        }).eq("ip", client_ip).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Rate limit check failed: {e}")
+        return True  # Fail open to avoid blocking legitimate requests on DB error
 
 
 def _validate_secret(request: Request):
@@ -287,7 +304,7 @@ def send_sms(to: str, body: str):
         logger.error(f"SMS send failed: {type(e).__name__}")
 
 @app.post("/webhook/lead")
-async def webhook_auto(request: Request, background_tasks: BackgroundTasks):
+async def webhook_auto(request: Request):
     client_ip = request.client.host
     if not _check_rate_limit(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
@@ -295,10 +312,10 @@ async def webhook_auto(request: Request, background_tasks: BackgroundTasks):
     _validate_secret(request)
     body = await request.json()
     parsed = _auto_detect(body)
-    return await _process_lead(parsed, background_tasks)
+    return await _process_lead(parsed)
 
 @app.post("/webhook/{source_type}")
-async def webhook_by_source(source_type: str, request: Request, background_tasks: BackgroundTasks):
+async def webhook_by_source(source_type: str, request: Request):
     client_ip = request.client.host
     if not _check_rate_limit(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
@@ -308,9 +325,9 @@ async def webhook_by_source(source_type: str, request: Request, background_tasks
     _validate_secret(request)
     body = await request.json()
     parsed = PARSERS[source_type](body)
-    return await _process_lead(parsed, background_tasks)
+    return await _process_lead(parsed)
 
-async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
+async def _process_lead(parsed: dict):
     name = parsed["name"]
     phone = _normalize_phone(parsed["phone"])
     service = parsed.get("service", "") or "our services"
@@ -356,7 +373,7 @@ async def _process_lead(parsed: dict, background_tasks: BackgroundTasks):
         return {"status": "accepted", "touch": 1, "source": source}
 
     body = _template("instant", name=name, service=service)
-    background_tasks.add_task(send_sms, phone, body)
+    send_sms(phone, body)
     logger.info("Lead accepted: phone=%s source=%s", _mask_phone(phone), source)
     return {"status": "accepted", "touch": 1, "source": source}
 
