@@ -10,11 +10,11 @@
   },
   "rewrites": [
     {
-      "source": "/(webhook|reply|voice|health|process-followups)(.*)",
+      "source": "/(webhook|reply|voice|health|process-followups)(?:.*)",
       "destination": "/api/index"
     },
     {
-      "source": "/config/reload(.*)",
+      "source": "/config/reload(?:.*)",
       "destination": "/api/index"
     }
   ]
