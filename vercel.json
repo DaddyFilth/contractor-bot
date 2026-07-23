@@ -5,7 +5,7 @@
   "functions": {
     "api/index.py": {
       "runtime": "python3.12",
-      "includeFiles": ["main.py", "business_config.json"]
+      "includeFiles": "{main.py,business_config.json}"
     }
   },
   "rewrites": [
