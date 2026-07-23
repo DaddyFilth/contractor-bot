@@ -1,0 +1,12 @@
+{
+  "name": "contractor-bot",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "cd frontend && npm install",
+    "dev": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "start": "cd frontend && npm run start",
+    "lint": "cd frontend && npm run lint"
+  }
+}
