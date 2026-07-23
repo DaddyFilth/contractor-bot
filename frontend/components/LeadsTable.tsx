@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getSupabaseClient, type Lead } from "@/lib/supabase";
 import LeadStatusBadge from "./LeadStatusBadge";
 
@@ -25,7 +25,7 @@ export default function LeadsTable() {
   const [sortKey, setSortKey] = useState<SortKey>("created_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
-  async function loadLeads() {
+  const loadLeads = useCallback(async () => {
     setLoading(true);
     setError(null);
     const db = getSupabaseClient();
@@ -40,13 +40,12 @@ export default function LeadsTable() {
       setLeads(data as Lead[]);
     }
     setLoading(false);
-  }
+  }, [statusFilter, sortKey, sortDir]);
 
   // Initial load + re-load when filters/sort change
   useEffect(() => {
     loadLeads();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, sortKey, sortDir]);
+  }, [loadLeads]);
 
   // Real-time subscription
   useEffect(() => {
@@ -62,8 +61,7 @@ export default function LeadsTable() {
     return () => {
       db.removeChannel(channel);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, sortKey, sortDir]);
+  }, [loadLeads]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {

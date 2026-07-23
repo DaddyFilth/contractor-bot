@@ -15,11 +15,11 @@
   ],
   "routes": [
     {
-      "src": "/(webhook|reply|voice|health|process-followups)(.*)",
+      "src": "/(webhook|reply|voice|health|process-followups)(?:.*)",
       "dest": "api/index.py"
     },
     {
-      "src": "/config/reload(.*)",
+      "src": "/config/reload(?:.*)",
       "dest": "api/index.py"
     },
     {

@@ -44,7 +44,10 @@ export default function ConfigEditor() {
     setMessage(null);
     try {
       await reloadConfig();
-      setConfig(form);
+      // Fetch the freshly-reloaded config from the server to stay in sync.
+      const fresh = await fetchConfig();
+      setConfig(fresh);
+      setForm(structuredClone(fresh));
       setMessage({ type: "success", text: "Config reloaded on the server." });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
