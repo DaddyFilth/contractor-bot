@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: contractor-bot-api
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn main:app -k uvicorn.workers.UvicornWorker --workers 2 --bind 0.0.0.0:$PORT --timeout 120 --access-logfile -
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: TEST_MODE
+        value: "false"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: TWILIO_SID
+        sync: false
+      - key: TWILIO_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+
+  - type: web
+    name: contractor-bot-dashboard
+    runtime: node
+    plan: starter
+    region: oregon
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- -p $PORT
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NEXT_PUBLIC_API_URL
+        sync: false

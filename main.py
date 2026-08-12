@@ -60,7 +60,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-# Full public URL of this app (e.g. https://your-app.vercel.app).
+# Full public URL of this app (e.g. https://your-app.onrender.com).
 # Required for Twilio webhook signature validation on /reply and /voice/* endpoints.
 APP_BASE_URL = os.getenv("APP_BASE_URL")
 # Set TEST_MODE=true to skip real SMS sends and DB writes during development/testing.
@@ -126,7 +126,7 @@ def _check_rate_limit(client_ip: str) -> bool:
     Calls the ``check_rate_limit`` Postgres function via Supabase RPC so the
     check-and-increment is a single atomic operation.  This avoids the
     read-then-write race condition of a separate SELECT + UPDATE and works
-    correctly across serverless invocations (e.g. Vercel).  Falls open on any
+    correctly across multiple application workers.  Falls open on any
     DB error to avoid blocking legitimate traffic.
     """
     if TEST_MODE:
@@ -389,7 +389,7 @@ async def _process_lead(parsed: dict):
 
     body = _template("instant", name=name, service=service)
     # send_sms is called synchronously so the SMS is guaranteed to be sent
-    # before Vercel's serverless function exits.  The trade-off is that slow
+    # before the webhook response is returned.  The trade-off is that slow
     # Twilio responses add latency to this endpoint.  send_sms already catches
     # all Twilio exceptions internally, so a slow/failed send will not raise
     # here; the lead record is already committed to the database at this point.
