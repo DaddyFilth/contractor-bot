@@ -108,10 +108,16 @@ async def startup_event():
 
 
 def _mask_phone(phone: str) -> str:
-    """Mask phone number for logging (show only first 3 and last 2 digits)"""
-    if not phone or len(phone) < 5:
-        return "***"
-    return phone[:3] + "***" + phone[-2:]
+    """Return an opaque token derived from the phone number for logging.
+
+    No part of the original number is included in the output, preventing
+    sensitive data from being written to log files (CWE-532).
+    """
+    import hashlib
+    if not phone:
+        return "[empty]"
+    digest = hashlib.sha256(phone.encode()).hexdigest()[:8]
+    return f"[phone:{digest}]"
 
 
 def _check_rate_limit(client_ip: str) -> bool:
