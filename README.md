@@ -13,7 +13,6 @@ A config-driven, source-agnostic lead-response bot for contractors. Swap `busine
 
 | Service | Purpose | Free Tier |
 |---------|---------|-----------|
-| [Vercel](https://vercel.com) | Hosting | Hobby (free) |
 | [Supabase](https://supabase.com) | Postgres database | 500 MB |
 | [Twilio](https://twilio.com) | SMS & voice | Client's own account |
 | [cron-job.org](https://cron-job.org) | Follow-up scheduler | Unlimited pings |
@@ -99,12 +98,7 @@ Additional flags:
 2. Note the **Project URL** and **service_role key** (Settings → API).
 3. Open the SQL editor, paste `supabase_schema.sql`, and run it.
 
-### Vercel
 
-1. Install the [Vercel CLI](https://vercel.com/docs/cli) (`npm i -g vercel`) or import the repo at [vercel.com/new](https://vercel.com/new).
-2. Run `vercel` in the project root (or click **Deploy** in the dashboard after connecting GitHub).
-3. In the Vercel project → **Settings** → **Environment Variables**, add all variables from `.env`.
-4. Copy the assigned `.vercel.app` URL and set it as `APP_BASE_URL`.
 
 ### Twilio webhooks
 
@@ -112,8 +106,6 @@ In the Twilio console, configure your phone number:
 
 | Event | URL |
 |-------|-----|
-| Incoming Message (SMS) | `https://your-app.vercel.app/reply` |
-| Incoming Call | `https://your-app.vercel.app/voice/inbound` |
 
 Both should use **HTTP POST**.
 
@@ -121,7 +113,6 @@ Both should use **HTTP POST**.
 
 Use [cron-job.org](https://cron-job.org) (free):
 
-- **URL:** `https://your-app.vercel.app/process-followups`
 - **Method:** GET
 - **Header:** `x-webhook-secret: <your WEBHOOK_SECRET>`
 - **Schedule:** Every 15 minutes
