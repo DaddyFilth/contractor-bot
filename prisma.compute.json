@@ -1,0 +1,12 @@
+{
+  "region": "us-east-1",
+  "app": {
+    "name": "frontend",
+    "root": "frontend",
+    "framework": "nextjs",
+    "httpPort": 3000,
+    "build": {
+      "command": "npm run build"
+    }
+  }
+}
