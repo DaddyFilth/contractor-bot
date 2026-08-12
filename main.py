@@ -610,3 +610,12 @@ async def get_config(request: Request):
     """Returns current config. Pass the webhook secret via the x-webhook-secret header."""
     _validate_secret(request)
     return {"business": CONFIG, "sources": list(PARSERS.keys())}
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Contractor Bot API",
+        "status": "online",
+        "health": "/health",
+        "docs": "/docs"
+    }
