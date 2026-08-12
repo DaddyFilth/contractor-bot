@@ -107,12 +107,6 @@ async def startup_event():
     _config_reload_lock = asyncio.Lock()
 
 
-def _mask_phone(phone: str) -> str:
-    """Mask phone number for logging (show only first 3 and last 2 digits)"""
-    if not phone or len(phone) < 5:
-        return "***"
-    return phone[:3] + "***" + phone[-2:]
-
 
 def _check_rate_limit(client_ip: str) -> bool:
     """Check if client has exceeded rate limit.
@@ -297,7 +291,7 @@ def _template(template_name: str, **kwargs) -> str:
 def send_sms(to: str, body: str):
     try:
         if TEST_MODE:
-            logger.info(f"Test mode: would send SMS to {_mask_phone(to)}: {body[:50]}...")
+            logger.info(f"Test mode: would send SMS (redacted): {body[:50]}...")
             return
 
         _require_twilio_client().messages.create(
@@ -388,7 +382,7 @@ async def _process_lead(parsed: dict):
     # all Twilio exceptions internally, so a slow/failed send will not raise
     # here; the lead record is already committed to the database at this point.
     send_sms(phone, body)
-    logger.info("Lead accepted: phone=%s source=%s", _mask_phone(phone), source)
+    logger.info("Lead accepted: source=%s", source)
     return {"status": "accepted", "touch": 1, "source": source}
 
 
@@ -489,7 +483,7 @@ async def handle_reply(request: Request):
                     "opted_out": True,
                     "next_followup_at": None,
                 }).eq("phone", from_phone).eq("business_id", CONFIG["business_id"]).execute()
-            logger.info("Opt-out received from %s", _mask_phone(from_phone))
+            logger.info("Opt-out received")
         except Exception as e:
             logger.error(f"Opt-out update failed: {e}")
         return {"status": "opted_out"}
@@ -500,9 +494,9 @@ async def handle_reply(request: Request):
             if resp.data:
                 lead_id = resp.data[0]["id"]
                 _require_supabase().table("leads").update({"status": "responded"}).eq("id", lead_id).execute()
-                logger.info("Lead responded: id=%s phone=%s", str(lead_id)[:8], _mask_phone(from_phone))
+                logger.info("Lead responded: id=%s", str(lead_id)[:8])
         else:
-            logger.info("Test mode: skipping reply DB update for %s", _mask_phone(from_phone))
+            logger.info("Test mode: skipping reply DB update")
     except Exception as e:
         logger.error(f"Reply handling failed: {e}")
 
@@ -559,19 +553,19 @@ def _send_missed_text(phone: str, call_sid: str) -> None:
     now = time.time()
     last_sent = _cooldown.get(phone, 0)
     if (now - last_sent) < cooldown_min * 60:
-        logger.info("SMS cooldown active for %s", _mask_phone(phone))
+        logger.info("SMS cooldown active")
         return
 
     body = _template("missed_call")
     if TEST_MODE:
-        logger.info(f"Test mode: would send missed-call SMS to {_mask_phone(phone)}: {body[:50]}...")
+        logger.info(f"Test mode: would send missed-call SMS (redacted): {body[:50]}...")
         _cooldown[phone] = now
         return
 
     try:
         _require_twilio_client().messages.create(to=phone, from_=CONFIG["twilio_phone"], body=body)
         _cooldown[phone] = now
-        logger.info("Missed-call SMS sent to %s", _mask_phone(phone))
+        logger.info("Missed-call SMS sent")
     except TwilioRestException as e:
         logger.error(f"Twilio SMS error: {e.code}")
     except Exception as e:
