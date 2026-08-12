@@ -17,6 +17,7 @@ import json
 import asyncio
 import time
 import logging
+import hashlib
 import hmac
 from dotenv import load_dotenv
 
@@ -113,7 +114,6 @@ def _mask_phone(phone: str) -> str:
     No part of the original number is included in the output, preventing
     sensitive data from being written to log files (CWE-532).
     """
-    import hashlib
     if not phone:
         return "[empty]"
     digest = hashlib.sha256(phone.encode()).hexdigest()[:8]
